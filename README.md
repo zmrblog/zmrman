@@ -10,3 +10,8 @@
 | Sing-box 管理 | yonggekkk | GitHub Repo | 甬哥（Yongge）开发的 Sing-box 全能脚本，支持多种协议组合和自动配置生成。 |
 | 宝塔面板 | bt11.btmb.cc | [Official/Mirror] | 第三方维护版本。 |
 | Docker 环境 | Docker 官方 | get.docker.com | Docker 官方提供的一键式安装脚本，自动检测系统环境并安装最新稳定版引擎。 |
+
+使用命令
+
+bash <(curl -l -s https://raw.githubusercontent.com/zmrblog/zmrman/refs/heads/main/zmrman.sh)
+bash <(curl -l -s http://d.zmrbk.com/code/zmrman.sh)
