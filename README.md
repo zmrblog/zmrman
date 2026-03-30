@@ -14,4 +14,5 @@
 使用命令
 
 bash <(curl -l -s https://raw.githubusercontent.com/zmrblog/zmrman/refs/heads/main/zmrman.sh)
+
 bash <(curl -l -s http://d.zmrbk.com/code/zmrman.sh)
