@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # ===========================================
-# 追梦人博客 - 服务器综合管理脚本 v4.2 (精简版)
+# 追梦人博客 - 服务器综合管理脚本
 # ===========================================
 
-# 颜色定义 
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,30 +15,32 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 全局变量
-LOG_FILE="/tmp/install_manager_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="/tmp/zmrman_$(date +%Y%m%d_%H%M%S).log"
 IPV4_ADDR=""
-SCRIPT_VERSION="4.2"
+SCRIPT_VERSION="4.3"
 
 # =========================================== 
-# 工具函数
+# 核心逻辑 (权限/网络/环境)
 # ===========================================
 
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local color=""
-    case $level in
-        "INFO")  color="${GREEN}" ;;
-        "WARN")  color="${YELLOW}" ;;
-        "ERROR") color="${RED}" ;;
-    esac
-    echo -e "${color}[$level]${NC} $message" >&2
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
-}
-
+# 权限检测与开启 root 登录
 check_root() {
-    [[ $EUID -ne 0 ]] && log "ERROR" "请以 root 权限运行此脚本！" && exit 1 
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${YELLOW}检测到当前登录用户非 root，正在开启 root 用户登录功能...${NC}"
+        echo -e "${CYAN}请输入要设置的 root 用户密码：${NC}"
+        sudo passwd root
+        
+        # 修改 SSH 配置允许 root 登录及密码验证
+        sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
+        sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+        
+        # 重启 SSH 服务
+        sudo systemctl restart sshd || sudo service ssh restart
+        
+        echo -e "${GREEN}✓ root 登录权限已开启并设置密码成功！${NC}"
+        echo -e "${YELLOW}请使用 root 用户重新 SSH 连接服务器后运行本脚本。${NC}"
+        exit 0
+    fi
 }
 
 detect_network() {
@@ -50,138 +52,121 @@ check_command() {
     local package=$2
     if ! command -v "$cmd" &>/dev/null; then
         if command -v apt &>/dev/null; then
-            apt update -qq && apt install -y -qq "$package"
+            apt update -qq && apt install -y -qq "$package" >> "$LOG_FILE" 2>&1
         elif command -v yum &>/dev/null; then
-            yum install -y -q "$package"
-        elif command -v dnf &>/dev/null; then
-            dnf install -y -q "$package"
+            yum install -y -q "$package" >> "$LOG_FILE" 2>&1
         fi
     fi
-}
-
-get_pkg_manager() {
-    if command -v apt &>/dev/null; then echo "apt"
-    elif command -v dnf &>/dev/null; then echo "dnf"
-    elif command -v yum &>/dev/null; then echo "yum"
-    else echo "unknown"; fi
 }
 
 # =========================================== 
 # 功能模块
 # ===========================================
 
-# 1. BBR安装
+# 1. BBR加速 (保留 byJoey 版本)
 install_bbr() {
-    log "INFO" "正在安装 byJoey BBR-v3..."
-    bash <(curl -L -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh)
-}
-
-# 2. BBR v3 终极优化
-install_bbr_ultimate() {
-    log "INFO" "正在执行 BBR v3 终极优化..."
-    bash <(curl -fsSL "https://raw.githubusercontent.com/Eric86777/vps-tcp-tune/main/install-alias.sh")
-}
-
-# 3. 系统重装
-install_reinstall_system() {
-    log "INFO" "正在下载重装脚本..."
+    echo -e "${BLUE}正在执行 BBR 加速安装 (过程详见日志)...${NC}"
     check_command "curl" "curl"
-    curl -fsSL -o reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh && \
+    bash <(curl -l -s https://raw.githubusercontent.com/byJoey/Actions-bbr-v3/refs/heads/main/install.sh)
+}
+
+# 2. 系统重装 (逻辑优化与修复)
+install_reinstall_system() {
+    echo -e "${RED}${BOLD}⚠️  警告：重装系统将清空所有数据！${NC}"
+    read -p "确认继续吗？(Y/n): " confirm
+    [[ "${confirm^^}" != "Y" ]] && return 
+
+    echo -e "\n${CYAN}请选择系统版本：${NC}"
+    echo -e " 1. Debian 13 (Trixie - 测试版)"
+    echo -e " 2. Debian 12 (Bookworm - 稳定版)"
+    echo -e " 3. Ubuntu 24.04 (Noble - LTS)"
+    echo -e " 4. Ubuntu 22.04 (Jammy - LTS)"
+    echo -e " 5. 自定义镜像地址 (支持 .gz / .iso / .xz / .raw)"
+    echo -e " 0. 返回主菜单"
+    
+    read -p "请输入序号: " sys_choice
+    
+    local os_type=""
+    local os_ver=""
+    local custom_url=""
+
+    case $sys_choice in
+        1) os_type="debian"; os_ver="13" ;;
+        2) os_type="debian"; os_ver="12" ;;
+        3) os_type="ubuntu"; os_ver="24.04" ;;
+        4) os_type="ubuntu"; os_ver="22.04" ;;
+        5) 
+            read -p "请输入自定义镜像下载直连地址: " custom_url
+            [[ -z "$custom_url" ]] && return
+            ;;
+        0|*) return ;;
+    esac
+
+    check_command "curl" "curl"
+    echo -e "${YELLOW}正在下载重装脚本...${NC}"
+    curl -fsSL -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh >> "$LOG_FILE" 2>&1
     chmod +x reinstall.sh
-    echo -e "${YELLOW}请根据提示选择要安装的系统版本：${NC}"
-    # 这里保留版本选择交互，但删除了初始的 Y/n 警告
-    ./reinstall.sh
+
+    if [[ -n "$custom_url" ]]; then
+        echo -e "${YELLOW}正在启动 DD 重装: $custom_url${NC}"
+        # 修复点：作者脚本使用 --img 标记 DD 镜像地址
+        bash reinstall.sh dd --img "$custom_url"
+    else
+        echo -e "${YELLOW}正在启动系统重装: $os_type $os_ver${NC}"
+        bash reinstall.sh "$os_type" "$os_ver"
+    fi
 }
 
-# 4. Hysteria2 安装
-install_hysteria() {
-    log "INFO" "正在安装 Hysteria2..."
-    bash <(curl -fsSL https://raw.githubusercontent.com/Misaka-blog/hysteria-install/main/hy2/hysteria.sh)
+# 3. 宝塔面板
+install_baota() {
+    echo -e "${BLUE}正在安装宝塔面板 (过程详见日志)...${NC}"
+    curl -sSO https://bt11.btmb.cc/install/install_panel.sh
+    bash install_panel.sh bt11.btmb.cc >> "$LOG_FILE" 2>&1
 }
 
-# 5. Sing-box 安装
+# 4. 修改SSH端口
+modify_ssh_port() {
+    read -p "请输入新的 SSH 端口号: " new_port 
+    if [[ "$new_port" =~ ^[0-9]+$ ]]; then
+        sed -i "/Port/d" /etc/ssh/sshd_config
+        echo "Port $new_port" >> /etc/ssh/sshd_config
+        systemctl restart sshd >> "$LOG_FILE" 2>&1
+        echo -e "${GREEN}✓ SSH 端口已修改为 $new_port${NC}"
+    fi
+}
+
+# 5. Sing-box
 install_singbox() {
-    log "INFO" "正在安装 Sing-box (yonggekkk)..."
+    echo -e "${BLUE}正在调用 Sing-box 安装脚本...${NC}"
     bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/sing-box-yg/main/sb.sh)
 }
 
-# 6. 宝塔面板
-install_baota() {
-    log "INFO" "正在安装宝塔面板..."
-    curl -sSO https://bt11.btmb.cc/install/install_panel.sh && bash install_panel.sh bt11.btmb.cc
-}
-
-# 7. 修改SSH端口
-modify_ssh_port() {
-    read -p "请输入新端口 (1-65535): " new_port 
-    if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
-        local bak_file="/etc/ssh/sshd_config.bak.$(date +%s)"
-        cp /etc/ssh/sshd_config "$bak_file"
-        sed -i '/^[[:space:]]*Port/d' /etc/ssh/sshd_config
-        echo "Port $new_port" >> /etc/ssh/sshd_config
-        
-        # 自动放行防火墙
-        if command -v ufw >/dev/null; then ufw allow "$new_port/tcp"; fi
-        if command -v firewall-cmd >/dev/null; then firewall-cmd --permanent --add-port="$new_port/tcp" && firewall-cmd --reload; fi
-
-        if systemctl restart sshd 2>/dev/null || systemctl restart ssh; then
-            log "INFO" "SSH端口已修改为 $new_port"
-            echo -e "${GREEN}✅ SSH端口修改成功！${NC}"
-        else
-            cp "$bak_file" /etc/ssh/sshd_config
-            systemctl restart sshd
-            log "ERROR" "修改失败，已还原配置"
-        fi
+# 6. Swap设置
+set_swap() {
+    read -p "请输入想要设置的 Swap 大小 (单位MB): " size
+    if [[ "$size" -gt 0 ]]; then
+        swapoff -a >> "$LOG_FILE" 2>&1
+        dd if=/dev/zero of=/swapfile bs=1M count=$size >> "$LOG_FILE" 2>&1
+        chmod 600 /swapfile
+        mkswap /swapfile >> "$LOG_FILE" 2>&1
+        swapon /swapfile >> "$LOG_FILE" 2>&1
+        sed -i '/\/swapfile/d' /etc/fstab
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        echo -e "${GREEN}✓ Swap 设置成功，当前大小: ${size}MB${NC}"
     fi
 }
 
-# 8. Docker管理
+# 7. Docker管理
 docker_management() {
     if ! command -v docker &>/dev/null; then
-        log "INFO" "正在安装 Docker..."
-        curl -fsSL https://get.docker.com | bash
-        systemctl enable --now docker
+        echo -e "${YELLOW}未检测到 Docker，正在自动安装...${NC}"
+        curl -fsSL https://get.docker.com | bash >> "$LOG_FILE" 2>&1
     fi
-    # 原脚本中复杂的 docker_management 循环逻辑在此简化调用
-    log "INFO" "Docker 环境已就绪"
-}
-
-# 9. 设置 Swap (新增)
-setup_swap() {
-    log "INFO" "正在配置 Swap 虚拟内存..."
-    read -p "请输入想要设置的 Swap 大小 (单位MB，如1024): " swap_size
-    if ! [[ "$swap_size" =~ ^[0-9]+$ ]]; then
-        log "ERROR" "输入无效"
-        return
-    fi
-    
-    # 检查并删除旧 swap
-    if grep -q "swapfile" /etc/fstab; then
-        swapoff /swapfile 2>/dev/null
-        sed -i '/swapfile/d' /etc/fstab
-        rm -f /swapfile
-    fi
-
-    # 创建新 swap
-    fallocate -l "${swap_size}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    
-    log "INFO" "Swap 设置完成: ${swap_size}MB"
-    echo -e "${GREEN}✅ Swap 设置完成！${NC}"
-}
-
-# 10. 时区同步
-timezone_management() {
-    log "INFO" "设置时区为上海..."
-    timedatectl set-timezone Asia/Shanghai
-    echo -e "${GREEN}✓ 时区已设置为 Asia/Shanghai${NC}"
+    docker ps -a
 }
 
 # ===========================================
-# 主界面
+# 主菜单
 # ===========================================
 
 main_menu() {
@@ -192,38 +177,43 @@ main_menu() {
         clear
         echo -e "\n${CYAN}${BOLD}═══════════════════════════════════════════════════════════════════${NC}"
         echo -e "          ${PURPLE}${BOLD}追梦人博客 - 服务器综合管理脚本 v${SCRIPT_VERSION}${NC}         "
-        echo -e "${CYAN}${BOLD}═══════════════════════════════════════════════════════════════════${NC}"
-        echo -e "\n${GREEN} 1. 安装BBR加速 (byJoey)      2. BBR v3 终极优化${NC}"
-        echo -e "${BLUE} 3. 系统重装 (直接进入)       4. 安装Hysteria代理${NC}"
-        echo -e "${BLUE} 5. 安装Sing-box (yg)         6. 安装宝塔面板${NC}"
-        echo -e "${PURPLE} 7. 修改SSH端口               8. 安装/检查Docker${NC}"
-        echo -e "${YELLOW} 9. 设置Swap (虚拟内存)       10. 同步上海时间${NC}"
-        echo -e "${YELLOW} 11. 查看脚本日志             12. 重启系统${NC}"
-        echo -e "${RED} 0. 退出脚本${NC}"
-        echo -e "\n${CYAN} IP: ${IPV4_ADDR} | 内存: $(free -m | awk 'NR==2{printf "%s/%sMB", $3,$2}') ${NC}"
+        echo -e "          ${YELLOW}后台日志: ${LOG_FILE}${NC}"
         echo -e "${CYAN}${BOLD}═══════════════════════════════════════════════════════════════════${NC}"
         
-        read -p "请选择操作 [0-12]: " choice 
+        echo -e "\n${GREEN} 1. 安装 BBR 加速 (byJoey)${NC}"
+        echo -e "${BLUE} 2. 系统一键重装 (Debian 13/12, Ubuntu 24/22)${NC}"
+        echo -e "${BLUE} 3. 安装宝塔面板 (bt11.btmb.cc)${NC}"
+        echo -e "${PURPLE} 4. 修改 SSH 端口${NC}"
+        echo -e "${PURPLE} 5. 安装 Sing-box 节点 (yonggekkk)${NC}"
+        echo -e "${GREEN} 6. Docker 综合管理 (安装/查看容器)${NC}"
+        echo -e "${GREEN} 7. 设置 Swap 虚拟内存${NC}"
+        echo -e "${YELLOW} 8. 同步上海时区${NC}"
+        echo -e "${RED} 9. 重启系统${NC}"
+        echo -e " 0. 退出脚本"
+        
+        echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
+        echo -e " 🌐 当前 IP: ${GREEN}${IPV4_ADDR}${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
+        
+        read -p "请选择操作 [0-9]: " choice 
 
         case $choice in 
             1) install_bbr ;;
-            2) install_bbr_ultimate ;;
-            3) install_reinstall_system ;;
-            4) install_hysteria ;;
+            2) install_reinstall_system ;;
+            3) install_baota ;;
+            4) modify_ssh_port ;;
             5) install_singbox ;;
-            6) install_baota ;;
-            7) modify_ssh_port ;;
-            8) docker_management ;;
-            9) setup_swap ;;
-            10) timezone_management ;;
-            11) [[ -f "$LOG_FILE" ]] && tail -n 50 "$LOG_FILE" || echo "暂无日志" ;;
-            12) reboot ;;
+            6) docker_management ;;
+            7) set_swap ;;
+            8) timedatectl set-timezone Asia/Shanghai >> "$LOG_FILE" 2>&1 && echo "时区已同步至上海" ;;
+            9) read -p "确认立即重启？(Y/n): " r && [[ "${r^^}" == "Y" ]] && reboot ;;
             0) exit 0 ;;
-            *) echo -e "${RED}无效输入${NC}"; sleep 1 ;;
+            *) echo -e "${RED}无效输入，请重新选择${NC}" && sleep 1 ;;
         esac 
         echo -e "\n"
         read -n 1 -s -r -p "按任意键返回主菜单..."
     done 
 }
 
+# 脚本入口
 main_menu
